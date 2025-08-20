@@ -1,0 +1,242 @@
+CREATE DATABASE IF NOT EXISTS gestion_cursos;
+USE gestion_cursos;
+
+-- =========================
+-- TABLAS BASE
+-- =========================
+
+CREATE TABLE roles (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nombre VARCHAR(50) NOT NULL UNIQUE
+);
+
+CREATE TABLE permisos (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL UNIQUE
+);
+
+CREATE TABLE rol_permiso (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    rol_id INT NOT NULL,
+    permiso_id INT NOT NULL,
+    FOREIGN KEY (rol_id) REFERENCES roles(id),
+    FOREIGN KEY (permiso_id) REFERENCES permisos(id)
+);
+
+CREATE TABLE usuarios (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL,
+    email VARCHAR(100) NOT NULL UNIQUE,
+    password VARCHAR(255) NOT NULL,
+    rol_id INT NOT NULL,
+    fecha_registro TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    activo BOOLEAN DEFAULT TRUE,
+    FOREIGN KEY (rol_id) REFERENCES roles(id)
+);
+
+CREATE TABLE tokens (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    usuario_id INT NOT NULL,
+    token VARCHAR(255) NOT NULL,
+    tipo ENUM('verificacion','recuperacion') NOT NULL,
+    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    fecha_expiracion TIMESTAMP NULL,  
+    usado BOOLEAN DEFAULT FALSE,
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+);
+
+
+CREATE TABLE cursos (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL,
+    descripcion TEXT,
+    profesor_id INT NOT NULL,
+    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (profesor_id) REFERENCES usuarios(id)
+);
+
+CREATE TABLE inscripciones (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    usuario_id INT NOT NULL,
+    curso_id INT NOT NULL,
+    fecha_inscripcion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id),
+    FOREIGN KEY (curso_id) REFERENCES cursos(id),
+    UNIQUE (usuario_id, curso_id)
+);
+
+CREATE TABLE logs_acceso (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    usuario_id INT NOT NULL,
+    accion VARCHAR(100) NOT NULL,
+    fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+);
+
+-- =========================
+-- DATOS INICIALES
+-- =========================
+
+INSERT INTO roles (nombre) VALUES ('Administrador'), ('Profesor'), ('Estudiante');
+
+-- =========================
+-- PROCEDIMIENTOS ALMACENADOS
+-- =========================
+
+DELIMITER //
+
+-- Insertar un nuevo usuario
+CREATE PROCEDURE sp_insertar_usuario(
+    IN p_nombre VARCHAR(100),
+    IN p_email VARCHAR(100),
+    IN p_password VARCHAR(255),
+    IN p_rol_id INT
+)
+BEGIN
+    INSERT INTO usuarios (nombre, email, password, rol_id)
+    VALUES (p_nombre, p_email, p_password, p_rol_id);
+END //
+
+-- Insertar un curso (solo si el usuario es profesor)
+CREATE PROCEDURE sp_insertar_curso(
+    IN p_nombre VARCHAR(100),
+    IN p_descripcion TEXT,
+    IN p_profesor_id INT
+)
+BEGIN
+    IF (SELECT rol_id FROM usuarios WHERE id = p_profesor_id) = 2 THEN
+        INSERT INTO cursos (nombre, descripcion, profesor_id)
+        VALUES (p_nombre, p_descripcion, p_profesor_id);
+    ELSE
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'El usuario no tiene rol de Profesor';
+    END IF;
+END //
+
+-- Login (retorna datos del usuario, la validación del hash se hace en PHP)
+CREATE PROCEDURE sp_login_usuario(
+    IN p_email VARCHAR(100)
+)
+BEGIN
+    SELECT id, nombre, email, password, rol_id
+    FROM usuarios
+    WHERE email = p_email AND activo = TRUE;
+END //
+
+-- Inscribir estudiante en un curso
+CREATE PROCEDURE sp_inscribir_estudiante(
+    IN p_usuario_id INT,
+    IN p_curso_id INT
+)
+BEGIN
+    IF (SELECT rol_id FROM usuarios WHERE id = p_usuario_id) = 3 THEN
+        INSERT INTO inscripciones (usuario_id, curso_id)
+        VALUES (p_usuario_id, p_curso_id);
+    ELSE
+        SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'El usuario no tiene rol de Estudiante';
+    END IF;
+END //
+
+CREATE PROCEDURE sp_eliminar_usuario(
+    IN p_usuario_id INT
+)
+BEGIN
+    DECLARE v_rol INT;
+    SELECT rol_id INTO v_rol FROM usuarios WHERE id = p_usuario_id;
+    IF v_rol = 1 THEN
+        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'No se puede eliminar administradores';
+    END IF;
+
+    -- Eliminar dependencias
+    DELETE FROM inscripciones WHERE usuario_id = p_usuario_id;
+    DELETE FROM tokens WHERE usuario_id = p_usuario_id;
+    DELETE FROM logs_acceso WHERE usuario_id = p_usuario_id;
+
+    -- Si fuera profesor, reasignar o eliminar sus cursos (aquí, ejemplo: eliminar cursos y sus inscripciones)
+    DELETE i FROM inscripciones i
+      JOIN cursos c ON c.id = i.curso_id
+      WHERE c.profesor_id = p_usuario_id;
+    DELETE FROM cursos WHERE profesor_id = p_usuario_id;
+
+    -- Finalmente, eliminar el usuario
+    DELETE FROM usuarios WHERE id = p_usuario_id AND rol_id <> 1;
+END //
+DELIMITER ;
+
+-- =========================
+-- TRIGGERS
+-- =========================
+
+DELIMITER //
+CREATE TRIGGER trg_log_cambio_password
+AFTER UPDATE ON usuarios
+FOR EACH ROW
+BEGIN
+    IF OLD.password <> NEW.password THEN
+        INSERT INTO logs_acceso (usuario_id, accion)
+        VALUES (NEW.id, 'Cambio de contraseña');
+    END IF;
+END //
+DELIMITER ;
+
+
+USE gestion_cursos;
+
+-- =========================
+-- USUARIOS DE PRUEBA
+-- =========================
+-- NOTA: en un proyecto real, el password debe ir con password_hash() en PHP
+-- aquí solo lo ponemos plano para testear, luego lo cambiarás
+
+CALL sp_insertar_usuario('Carlos Admin', 'admin@example.com', 'admin123', 1);
+CALL sp_insertar_usuario('Pedro Profesor', 'profesor@example.com', 'profesor123', 2);
+CALL sp_insertar_usuario('Ana Estudiante', 'ana@example.com', 'estudiante123', 3);
+CALL sp_insertar_usuario('Luis Estudiante', 'luis@example.com', 'estudiante123', 3);
+
+-- =========================
+-- CURSOS DE PRUEBA
+-- =========================
+-- Solo el Profesor puede crear cursos
+CALL sp_insertar_curso('Matemáticas Básicas', 'Curso introductorio de matemáticas', 2);
+CALL sp_insertar_curso('Programación en PHP', 'Aprende fundamentos de PHP y MVC', 2);
+
+-- =========================
+-- INSCRIPCIONES
+-- =========================
+-- Solo los estudiantes se pueden inscribir
+CALL sp_inscribir_estudiante(3, 1); -- Ana se inscribe a Matemáticas Básicas
+CALL sp_inscribir_estudiante(4, 2); -- Luis se inscribe a Programación en PHP
+CALL sp_inscribir_estudiante(3, 2); -- Ana también se inscribe a Programación en PHP
+
+-- =========================
+-- LOGS DE PRUEBA
+-- =========================
+INSERT INTO logs_acceso (usuario_id, accion) VALUES
+(1, 'Login exitoso'),
+(2, 'Creó un curso'),
+(3, 'Se inscribió a un curso');
+
+-- Actualizar contraseñas de usuarios de prueba con hashes seguros
+USE gestion_cursos;
+
+
+USE gestion_cursos;
+UPDATE usuarios SET password = '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi' 
+WHERE email IN ('admin@example.com', 'profesor@example.com', 'ana@example.com', 'luis@example.com');
+
+USE gestion_cursos;
+
+-- Actualizar contraseñas con hashes correctos
+UPDATE usuarios SET password = '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi' 
+WHERE email IN ('admin@example.com', 'profesor@example.com', 'ana@example.com', 'luis@example.com');
+
+-- Verificar que se actualizaron
+SELECT id, nombre, email, LEFT(password, 10) as password_preview FROM usuarios;
+
+CREATE TABLE IF NOT EXISTS password_resets (
+  email VARCHAR(100) NOT NULL PRIMARY KEY,
+  token VARCHAR(128) NOT NULL,
+  expira DATETIME NOT NULL,
+  INDEX (token)
+);
