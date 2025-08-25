@@ -186,10 +186,7 @@ USE gestion_cursos;
 -- =========================
 -- USUARIOS DE PRUEBA
 -- =========================
--- NOTA: en un proyecto real, el password debe ir con password_hash() en PHP
--- aquí solo lo ponemos plano para testear, luego lo cambiarás
-
-CALL sp_insertar_usuario('Carlos Admin', 'admin@example.com', 'admin123', 1);
+CALL sp_insertar_usuario('joseadmin', 'josecarlosmunozalberti@gmail.com', 'admin123', 1);
 CALL sp_insertar_usuario('Pedro Profesor', 'profesor@example.com', 'profesor123', 2);
 CALL sp_insertar_usuario('Ana Estudiante', 'ana@example.com', 'estudiante123', 3);
 CALL sp_insertar_usuario('Luis Estudiante', 'luis@example.com', 'estudiante123', 3);
@@ -229,9 +226,9 @@ USE gestion_cursos;
 
 -- Actualizar contraseñas con hashes correctos
 UPDATE usuarios SET password = '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi' 
-WHERE email IN ('admin@example.com', 'profesor@example.com', 'ana@example.com', 'luis@example.com');
+WHERE email IN ('josecarlosmunozalberti@gmail.com');
 
--- Verificar que se actualizaron
+-- Verificar que se actualizaron`
 SELECT id, nombre, email, LEFT(password, 10) as password_preview FROM usuarios;
 
 CREATE TABLE IF NOT EXISTS password_resets (
@@ -240,3 +237,336 @@ CREATE TABLE IF NOT EXISTS password_resets (
   expira DATETIME NOT NULL,
   INDEX (token)
 );
+
+SELECT id, nombre, email, rol_id, fecha_registro 
+FROM usuarios;
+-- profesores con email
+SELECT u.id, u.nombre, u.email 
+FROM usuarios u
+JOIN roles r ON u.rol_id = r.id
+WHERE r.nombre = 'Profesor';
+-- Cursos y su docente
+SELECT c.id, c.nombre AS curso, u.nombre AS profesor
+FROM cursos c
+JOIN usuarios u ON c.profesor_id = u.id;
+-- Estudiantes inscritos
+SELECT c.nombre AS curso, u.nombre AS estudiante
+FROM inscripciones i
+JOIN usuarios u ON i.usuario_id = u.id
+JOIN cursos c ON i.curso_id = c.id
+ORDER BY c.nombre;
+-- buscar por correo
+SELECT id, nombre, rol_id 
+FROM usuarios
+WHERE email = 'jose@example.com';
+-- acciones realizadas por usuario
+SELECT l.accion, l.fecha
+FROM logs_acceso l
+JOIN usuarios u ON l.usuario_id = u.id
+WHERE u.email = 'jose@example.com';
+-- cambios de contrasena realizados
+SELECT u.nombre, l.fecha
+FROM logs_acceso l
+JOIN usuarios u ON l.usuario_id = u.id
+WHERE l.accion = 'Cambio de contraseña';
+-- crear admin
+INSERT INTO usuarios (nombre, email, password, rol_id)
+VALUES ('moscosinho', 'moscoso@example.com', 'coso123', 1);
+
+-- asdasdasdasdasdasd
+USE gestion_cursos;
+
+-- 1) Ampliar tipos de token para incluir OTP de login
+ALTER TABLE tokens 
+MODIFY COLUMN tipo ENUM('verificacion','recuperacion','login_otp') NOT NULL;
+
+-- Índice útil para validación de OTP
+CREATE INDEX idx_tokens_login_otp ON tokens (usuario_id, tipo, token, usado, fecha_expiracion);
+
+-- 2) Crear tabla de historial de contraseñas
+CREATE TABLE IF NOT EXISTS password_historial (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  usuario_id INT NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (usuario_id) REFERENCES usuarios(id),
+  INDEX idx_ph_usuario_fecha (usuario_id, creado_en)
+);
+
+-- 3) Backfill: insertar las contraseñas actuales al historial (una sola vez)
+INSERT INTO password_historial (usuario_id, password_hash, creado_en)
+SELECT u.id, u.password, NOW()
+FROM usuarios u
+LEFT JOIN (
+  SELECT usuario_id FROM password_historial GROUP BY usuario_id
+) ph ON ph.usuario_id = u.id
+WHERE ph.usuario_id IS NULL;
+
+-- 4) (Opcional) Limpiar tokens OTP expirados periódicamente (si tienes eventos)
+-- CREATE EVENT IF NOT EXISTS ev_cleanup_tokens
+-- ON SCHEDULE EVERY 1 HOUR
+-- DO
+--   DELETE FROM tokens WHERE tipo='login_otp' AND (fecha_expiracion IS NOT NULL AND fecha_expiracion < NOW());
+-- =========================
+-- SCRIPT DE LIMPIEZA (EJECUTAR PRIMERO SI YA EXISTE)
+-- =========================
+
+USE gestion_cursos;
+-- =========================
+-- TABLA BITÁCORA
+-- =========================
+CREATE TABLE bitacora (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    usuario VARCHAR(100),
+    email VARCHAR(100),
+    rol VARCHAR(50),
+    accion VARCHAR(100),
+    detalle TEXT,
+    ip VARCHAR(45),
+    estado_usuario VARCHAR(20) DEFAULT 'ACTIVO',
+    INDEX idx_fecha (fecha),
+    INDEX idx_usuario (usuario),
+    INDEX idx_accion (accion)
+);
+
+-- =========================
+-- PROCEDIMIENTO PARA INSERTAR EN BITÁCORA
+-- =========================
+DELIMITER //
+
+CREATE PROCEDURE sp_log_bitacora(
+    IN p_usuario_id INT,
+    IN p_accion VARCHAR(100),
+    IN p_detalle TEXT,
+    IN p_ip VARCHAR(45)
+)
+BEGIN
+    DECLARE v_usuario VARCHAR(100);
+    DECLARE v_email VARCHAR(100);
+    DECLARE v_rol VARCHAR(50);
+    DECLARE v_estado VARCHAR(20);
+
+    -- Si no viene IP, lo dejamos como NULL
+    IF p_ip IS NULL THEN
+        SET p_ip = '';
+    END IF;
+
+    -- Obtener datos del usuario
+    SELECT u.nombre, u.email, r.nombre, IF(u.activo, 'ACTIVO', 'INACTIVO')
+    INTO v_usuario, v_email, v_rol, v_estado
+    FROM usuarios u
+    JOIN roles r ON u.rol_id = r.id
+    WHERE u.id = p_usuario_id;
+
+    -- Insertar en bitácora
+    INSERT INTO bitacora (usuario, email, rol, accion, detalle, ip, estado_usuario)
+    VALUES (v_usuario, v_email, v_rol, p_accion, p_detalle, p_ip, v_estado);
+END //
+
+DELIMITER ;
+
+-- =========================
+-- TRIGGERS PARA USUARIOS
+-- =========================
+DELIMITER //
+
+CREATE TRIGGER trg_bitacora_usuarios_insert
+AFTER INSERT ON usuarios
+FOR EACH ROW
+BEGIN
+    CALL sp_log_bitacora(NEW.id, 'USUARIO CREADO', 
+        CONCAT('Nuevo usuario: ', NEW.nombre, ' con email: ', NEW.email), NULL);
+END //
+
+CREATE TRIGGER trg_bitacora_usuarios_update
+AFTER UPDATE ON usuarios
+FOR EACH ROW
+BEGIN
+    DECLARE v_cambios TEXT;
+
+    SET v_cambios = '';
+
+    IF OLD.nombre <> NEW.nombre THEN
+        SET v_cambios = CONCAT(v_cambios, 'Nombre: ', OLD.nombre, ' → ', NEW.nombre, '; ');
+    END IF;
+
+    IF OLD.email <> NEW.email THEN
+        SET v_cambios = CONCAT(v_cambios, 'Email: ', OLD.email, ' → ', NEW.email, '; ');
+    END IF;
+
+    IF OLD.password <> NEW.password THEN
+        SET v_cambios = CONCAT(v_cambios, 'Contraseña cambiada; ');
+    END IF;
+
+    IF OLD.rol_id <> NEW.rol_id THEN
+        SET v_cambios = CONCAT(v_cambios, 'Rol cambiado; ');
+    END IF;
+
+    IF OLD.activo <> NEW.activo THEN
+        SET v_cambios = CONCAT(v_cambios, 'Estado: ', IF(OLD.activo,'ACTIVO','INACTIVO'), 
+            ' → ', IF(NEW.activo,'ACTIVO','INACTIVO'), '; ');
+    END IF;
+
+    IF v_cambios <> '' THEN
+        CALL sp_log_bitacora(NEW.id, 'USUARIO MODIFICADO', v_cambios, NULL);
+    END IF;
+END //
+
+CREATE TRIGGER trg_bitacora_usuarios_delete
+BEFORE DELETE ON usuarios
+FOR EACH ROW
+BEGIN
+    CALL sp_log_bitacora(OLD.id, 'USUARIO ELIMINADO', 
+        CONCAT('Usuario eliminado: ', OLD.nombre, ' (', OLD.email, ')'), NULL);
+END //
+
+-- =========================
+-- TRIGGERS PARA CURSOS
+-- =========================
+CREATE TRIGGER trg_bitacora_cursos_insert
+AFTER INSERT ON cursos
+FOR EACH ROW
+BEGIN
+    CALL sp_log_bitacora(NEW.profesor_id, 'CURSO CREADO', 
+        CONCAT('Nuevo curso: ', NEW.nombre), NULL);
+END //
+
+CREATE TRIGGER trg_bitacora_cursos_update
+AFTER UPDATE ON cursos
+FOR EACH ROW
+BEGIN
+    DECLARE v_cambios TEXT;
+
+    SET v_cambios = '';
+
+    IF OLD.nombre <> NEW.nombre THEN
+        SET v_cambios = CONCAT(v_cambios, 'Nombre: ', OLD.nombre, ' → ', NEW.nombre, '; ');
+    END IF;
+
+    IF OLD.descripcion <> NEW.descripcion THEN
+        SET v_cambios = CONCAT(v_cambios, 'Descripción modificada; ');
+    END IF;
+
+    CALL sp_log_bitacora(NEW.profesor_id, 'CURSO MODIFICADO', 
+        CONCAT('Curso: ', NEW.nombre, ' - ', v_cambios), NULL);
+END //
+
+CREATE TRIGGER trg_bitacora_cursos_delete
+BEFORE DELETE ON cursos
+FOR EACH ROW
+BEGIN
+    CALL sp_log_bitacora(OLD.profesor_id, 'CURSO ELIMINADO', 
+        CONCAT('Curso eliminado: ', OLD.nombre), NULL);
+END //
+
+-- =========================
+-- TRIGGERS PARA INSCRIPCIONES
+-- =========================
+CREATE TRIGGER trg_bitacora_inscripciones_insert
+AFTER INSERT ON inscripciones
+FOR EACH ROW
+BEGIN
+    DECLARE v_curso_nombre VARCHAR(100);
+    SELECT nombre INTO v_curso_nombre FROM cursos WHERE id = NEW.curso_id;
+
+    CALL sp_log_bitacora(NEW.usuario_id, 'INSCRIPCIÓN', 
+        CONCAT('Se inscribió al curso: ', v_curso_nombre), NULL);
+END //
+
+CREATE TRIGGER trg_bitacora_inscripciones_delete
+BEFORE DELETE ON inscripciones
+FOR EACH ROW
+BEGIN
+    DECLARE v_curso_nombre VARCHAR(100);
+    SELECT nombre INTO v_curso_nombre FROM cursos WHERE id = OLD.curso_id;
+
+    CALL sp_log_bitacora(OLD.usuario_id, 'DESINSCRIPCIÓN', 
+        CONCAT('Se desinscribió del curso: ', v_curso_nombre), NULL);
+END //
+
+DELIMITER ;
+
+-- =========================
+-- PROCEDIMIENTOS PARA SESIONES
+-- =========================
+DELIMITER //
+
+CREATE PROCEDURE sp_log_login(
+    IN p_usuario_id INT,
+    IN p_ip VARCHAR(45),
+    IN p_exitoso BOOLEAN
+)
+BEGIN
+    IF p_exitoso THEN
+        CALL sp_log_bitacora(p_usuario_id, 'LOGIN EXITOSO', 'Usuario inició sesión', p_ip);
+    ELSE
+        CALL sp_log_bitacora(p_usuario_id, 'LOGIN FALLIDO', 'Intento de login fallido', p_ip);
+    END IF;
+END //
+
+CREATE PROCEDURE sp_log_logout(
+    IN p_usuario_id INT,
+    IN p_ip VARCHAR(45)
+)
+BEGIN
+    CALL sp_log_bitacora(p_usuario_id, 'LOGOUT', 'Usuario cerró sesión', p_ip);
+END //
+
+CREATE PROCEDURE sp_log_actividad(
+    IN p_usuario_id INT,
+    IN p_actividad TEXT,
+    IN p_ip VARCHAR(45)
+)
+BEGIN
+    CALL sp_log_bitacora(p_usuario_id, 'ACTIVIDAD', p_actividad, p_ip);
+END //
+
+DELIMITER ;
+
+-- =========================
+-- MIGRAR DATOS EXISTENTES DE logs_acceso
+-- =========================
+INSERT INTO bitacora (fecha, usuario, email, rol, accion, detalle, estado_usuario)
+SELECT 
+    l.fecha,
+    u.nombre,
+    u.email,
+    r.nombre,
+    l.accion,
+    l.accion,
+    IF(u.activo, 'ACTIVO', 'INACTIVO')
+FROM logs_acceso l
+JOIN usuarios u ON l.usuario_id = u.id
+JOIN roles r ON u.rol_id = r.id;
+
+-- ===========
+-- CONSULTAS 
+-- ===========
+
+-- Ver actividad de un usuario específico
+ SELECT * FROM bitacora WHERE usuario = 'Pedro Profesor' ORDER BY fecha DESC;
+
+-- Ver solo logins
+ SELECT * FROM bitacora WHERE accion LIKE '%LOGIN%' ORDER BY fecha DESC;
+
+-- Ver actividad del día
+ SELECT * FROM bitacora WHERE DATE(fecha) = CURDATE() ORDER BY fecha DESC;
+
+-- Ver usuarios inactivos que han hecho algo
+ SELECT * FROM bitacora WHERE estado_usuario = 'INACTIVO' ORDER BY fecha DESC;
+
+-- Contar actividades por usuario
+ SELECT usuario, COUNT(*) as total FROM bitacora GROUP BY usuario ORDER BY total DESC;
+
+-- verificar las veces que cambiaron contrasenas
+SELECT LEFT(ph.password_hash, 20) AS hash_preview, ph.creado_en
+FROM password_historial ph
+JOIN usuarios u ON u.id = ph.usuario_id
+WHERE u.email = 'josecarlosmunozalberti1@gmail.com'
+ORDER BY ph.creado_en DESC
+LIMIT 5;
+
+select * from password_historial;
+select * from bitacora;
+
