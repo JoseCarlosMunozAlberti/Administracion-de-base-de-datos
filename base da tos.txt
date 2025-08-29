@@ -540,6 +540,19 @@ FROM logs_acceso l
 JOIN usuarios u ON l.usuario_id = u.id
 JOIN roles r ON u.rol_id = r.id;
 
+use gestion_cursos;
+
+DROP TABLE IF EXISTS password_historial;
+CREATE TABLE password_historial (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  usuario_id INT NOT NULL,
+  password_hash VARCHAR(255) NOT NULL,
+  creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_ph_usuario_creado (usuario_id, creado_en),
+  CONSTRAINT fk_password_historial_usuario
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
+    ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 -- ===========
 -- CONSULTAS 
 -- ===========
@@ -569,4 +582,5 @@ LIMIT 5;
 
 select * from password_historial;
 select * from bitacora;
+select * from tokens;
 
