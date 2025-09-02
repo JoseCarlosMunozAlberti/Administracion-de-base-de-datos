@@ -1,4 +1,4 @@
-CREATE DATABASE IF NOT EXISTS gestion_cursos;
+
 USE gestion_cursos;
 
 -- =========================
@@ -222,11 +222,6 @@ USE gestion_cursos;
 UPDATE usuarios SET password = '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi' 
 WHERE email IN ('admin@example.com', 'profesor@example.com', 'ana@example.com', 'luis@example.com');
 
-USE gestion_cursos;
-
--- Actualizar contraseñas con hashes correctos
-UPDATE usuarios SET password = '$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi' 
-WHERE email IN ('josecarlosmunozalberti@gmail.com');
 
 -- Verificar que se actualizaron`
 SELECT id, nombre, email, LEFT(password, 10) as password_preview FROM usuarios;
@@ -237,44 +232,6 @@ CREATE TABLE IF NOT EXISTS password_resets (
   expira DATETIME NOT NULL,
   INDEX (token)
 );
-
-SELECT id, nombre, email, rol_id, fecha_registro 
-FROM usuarios;
--- profesores con email
-SELECT u.id, u.nombre, u.email 
-FROM usuarios u
-JOIN roles r ON u.rol_id = r.id
-WHERE r.nombre = 'Profesor';
--- Cursos y su docente
-SELECT c.id, c.nombre AS curso, u.nombre AS profesor
-FROM cursos c
-JOIN usuarios u ON c.profesor_id = u.id;
--- Estudiantes inscritos
-SELECT c.nombre AS curso, u.nombre AS estudiante
-FROM inscripciones i
-JOIN usuarios u ON i.usuario_id = u.id
-JOIN cursos c ON i.curso_id = c.id
-ORDER BY c.nombre;
--- buscar por correo
-SELECT id, nombre, rol_id 
-FROM usuarios
-WHERE email = 'jose@example.com';
--- acciones realizadas por usuario
-SELECT l.accion, l.fecha
-FROM logs_acceso l
-JOIN usuarios u ON l.usuario_id = u.id
-WHERE u.email = 'jose@example.com';
--- cambios de contrasena realizados
-SELECT u.nombre, l.fecha
-FROM logs_acceso l
-JOIN usuarios u ON l.usuario_id = u.id
-WHERE l.accion = 'Cambio de contraseña';
--- crear admin
-INSERT INTO usuarios (nombre, email, password, rol_id)
-VALUES ('moscosinho', 'moscoso@example.com', 'coso123', 1);
-
--- asdasdasdasdasdasd
-USE gestion_cursos;
 
 -- 1) Ampliar tipos de token para incluir OTP de login
 ALTER TABLE tokens 
@@ -311,7 +268,6 @@ WHERE ph.usuario_id IS NULL;
 -- SCRIPT DE LIMPIEZA (EJECUTAR PRIMERO SI YA EXISTE)
 -- =========================
 
-USE gestion_cursos;
 -- =========================
 -- TABLA BITÁCORA
 -- =========================
@@ -554,33 +510,589 @@ CREATE TABLE password_historial (
     ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 -- ===========
--- CONSULTAS 
--- ===========
 
--- Ver actividad de un usuario específico
- SELECT * FROM bitacora WHERE usuario = 'Pedro Profesor' ORDER BY fecha DESC;
 
--- Ver solo logins
- SELECT * FROM bitacora WHERE accion LIKE '%LOGIN%' ORDER BY fecha DESC;
+SET GLOBAL event_scheduler = ON;
 
--- Ver actividad del día
- SELECT * FROM bitacora WHERE DATE(fecha) = CURDATE() ORDER BY fecha DESC;
+-- =====================================================
+-- SCRIPT COMPLETO PARA SISTEMA DE SUSCRIPCIONES Y SESIONES
+-- =====================================================
 
--- Ver usuarios inactivos que han hecho algo
- SELECT * FROM bitacora WHERE estado_usuario = 'INACTIVO' ORDER BY fecha DESC;
+-- Habilitar el event scheduler
+SET GLOBAL event_scheduler = ON;
 
--- Contar actividades por usuario
- SELECT usuario, COUNT(*) as total FROM bitacora GROUP BY usuario ORDER BY total DESC;
+-- =====================================================
+-- TABLAS DEL SISTEMA DE SUSCRIPCIONES
+-- =====================================================
 
--- verificar las veces que cambiaron contrasenas
-SELECT LEFT(ph.password_hash, 20) AS hash_preview, ph.creado_en
-FROM password_historial ph
-JOIN usuarios u ON u.id = ph.usuario_id
-WHERE u.email = 'josecarlosmunozalberti1@gmail.com'
-ORDER BY ph.creado_en DESC
-LIMIT 5;
+-- Tabla de suscripciones disponibles
+CREATE TABLE IF NOT EXISTS suscripciones (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL,
+    descripcion TEXT,
+    tipo ENUM('basica', 'premium', 'familiar') NOT NULL,
+    sesiones_concurrentes INT NOT NULL DEFAULT 1,
+    usuarios_maximos INT NOT NULL DEFAULT 1,
+    duracion_dias INT NOT NULL DEFAULT 30,
+    precio DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+    activo BOOLEAN NOT NULL DEFAULT 1,
+    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
 
-select * from password_historial;
-select * from bitacora;
-select * from tokens;
+-- Tabla de suscripciones de usuarios
+CREATE TABLE IF NOT EXISTS usuarios_suscripcion (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    usuario_id INT NOT NULL,
+    suscripcion_id INT NOT NULL,
+    fecha_inicio TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    fecha_fin TIMESTAMP NULL,
+    activo BOOLEAN NOT NULL DEFAULT 1,
+    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
+    FOREIGN KEY (suscripcion_id) REFERENCES suscripciones(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_usuario_activo (usuario_id, activo)
+);
 
+-- Tabla de sesiones activas
+CREATE TABLE IF NOT EXISTS sesiones_activas (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    usuario_id INT NOT NULL,
+    session_id VARCHAR(255) NOT NULL,
+    ip_address VARCHAR(45),
+    user_agent TEXT,
+    fecha_inicio TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    fecha_ultima_actividad TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    activo BOOLEAN NOT NULL DEFAULT 1,
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_session (session_id)
+);
+
+-- Tabla de familias (para suscripción familiar)
+CREATE TABLE IF NOT EXISTS familias (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nombre VARCHAR(100) NOT NULL,
+    suscripcion_id INT NOT NULL,
+    fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (suscripcion_id) REFERENCES suscripciones(id) ON DELETE CASCADE
+);
+
+-- Tabla de miembros de familia
+CREATE TABLE IF NOT EXISTS familia_miembros (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    familia_id INT NOT NULL,
+    usuario_id INT NOT NULL,
+    fecha_agregado TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (familia_id) REFERENCES familias(id) ON DELETE CASCADE,
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
+    UNIQUE KEY unique_miembro (familia_id, usuario_id)
+);
+
+-- =====================================================
+-- DATOS INICIALES DE SUSCRIPCIONES
+-- =====================================================
+
+INSERT INTO suscripciones (nombre, descripcion, tipo, sesiones_concurrentes, usuarios_maximos, duracion_dias, precio, activo) VALUES
+('Básica Gratuita', 'Acceso básico con 1 sesión concurrente', 'basica', 1, 1, 30, 0.00, 1),
+('Premium Mensual', 'Acceso premium con 3 sesiones concurrentes', 'premium', 3, 1, 30, 9.99, 1),
+('Premium Anual', 'Acceso premium anual con 3 sesiones concurrentes', 'premium', 3, 1, 365, 99.99, 1),
+('Familiar Mensual', 'Acceso familiar con 5 usuarios simultáneos', 'familiar', 5, 5, 30, 19.99, 1),
+('Familiar Anual', 'Acceso familiar anual con 5 usuarios simultáneos', 'familiar', 5, 5, 365, 199.99, 1);
+
+-- =====================================================
+-- PROCEDIMIENTOS ALMACENADOS
+-- =====================================================
+
+DELIMITER //
+
+-- Procedimiento para verificar si un usuario puede iniciar sesión
+CREATE PROCEDURE sp_verificar_sesion_disponible(
+    IN p_usuario_id INT
+)
+BEGIN
+    DECLARE v_suscripcion_id INT;
+    DECLARE v_sesiones_concurrentes INT;
+    DECLARE v_sesiones_activas INT;
+    DECLARE v_puede_iniciar BOOLEAN DEFAULT 1;
+    DECLARE v_mensaje VARCHAR(255) DEFAULT 'Puede iniciar sesión';
+    
+    -- Obtener la suscripción activa del usuario
+    SELECT us.suscripcion_id, s.sesiones_concurrentes
+    INTO v_suscripcion_id, v_sesiones_concurrentes
+    FROM usuarios_suscripcion us
+    JOIN suscripciones s ON us.suscripcion_id = s.id
+    WHERE us.usuario_id = p_usuario_id AND us.activo = 1
+    LIMIT 1;
+    
+    -- Si no tiene suscripción, asignar básica gratuita
+    IF v_suscripcion_id IS NULL THEN
+        INSERT INTO usuarios_suscripcion (usuario_id, suscripcion_id, fecha_fin)
+        VALUES (p_usuario_id, 1, DATE_ADD(NOW(), INTERVAL 30 DAY));
+        
+        SET v_suscripcion_id = 1;
+        SET v_sesiones_concurrentes = 1;
+    END IF;
+    
+    -- Contar sesiones activas del usuario
+    SELECT COUNT(*)
+    INTO v_sesiones_activas
+    FROM sesiones_activas
+    WHERE usuario_id = p_usuario_id AND activo = 1;
+    
+    -- Verificar si puede iniciar sesión
+    IF v_sesiones_activas >= v_sesiones_concurrentes THEN
+        SET v_puede_iniciar = 0;
+        SET v_mensaje = CONCAT('Límite de sesiones alcanzado. Tienes ', v_sesiones_activas, ' de ', v_sesiones_concurrentes, ' sesiones activas.');
+    END IF;
+    
+    -- Retornar resultados
+    SELECT v_puede_iniciar as puede_iniciar, v_sesiones_activas as sesiones_activas, 
+           v_sesiones_concurrentes as limite_sesiones, v_mensaje as mensaje;
+END //
+DELIMITER //
+-- Procedimiento para registrar una nueva sesión
+CREATE PROCEDURE sp_registrar_sesion(
+    IN p_usuario_id INT,
+    IN p_session_id VARCHAR(255),
+    IN p_ip_address VARCHAR(45),
+    IN p_user_agent TEXT
+)
+BEGIN
+    DECLARE v_suscripcion_id INT;
+    DECLARE v_sesiones_concurrentes INT;
+    DECLARE v_sesiones_activas INT;
+    DECLARE v_exito BOOLEAN DEFAULT 1;
+    DECLARE v_mensaje VARCHAR(255) DEFAULT 'Sesión registrada correctamente';
+    
+    -- Obtener la suscripción activa del usuario
+    SELECT us.suscripcion_id, s.sesiones_concurrentes
+    INTO v_suscripcion_id, v_sesiones_concurrentes
+    FROM usuarios_suscripcion us
+    JOIN suscripciones s ON us.suscripcion_id = s.id
+    WHERE us.usuario_id = p_usuario_id AND us.activo = 1
+    LIMIT 1;
+    
+    -- Si no tiene suscripción, asignar básica gratuita
+    IF v_suscripcion_id IS NULL THEN
+        INSERT INTO usuarios_suscripcion (usuario_id, suscripcion_id, fecha_fin)
+        VALUES (p_usuario_id, 1, DATE_ADD(NOW(), INTERVAL 30 DAY));
+        
+        SET v_suscripcion_id = 1;
+        SET v_sesiones_concurrentes = 1;
+    END IF;
+    
+    -- Contar sesiones activas del usuario
+    SELECT COUNT(*)
+    INTO v_sesiones_activas
+    FROM sesiones_activas
+    WHERE usuario_id = p_usuario_id AND activo = 1;
+    
+    -- Verificar límite de sesiones
+    IF v_sesiones_activas >= v_sesiones_concurrentes THEN
+        -- Cerrar la sesión más antigua si es básica
+        IF v_sesiones_concurrentes = 1 THEN
+            UPDATE sesiones_activas 
+            SET activo = 0 
+            WHERE usuario_id = p_usuario_id AND activo = 1
+            ORDER BY fecha_inicio ASC 
+            LIMIT 1;
+        ELSE
+            SET v_exito = 0;
+            SET v_mensaje = CONCAT('Límite de sesiones alcanzado. Tienes ', v_sesiones_activas, ' de ', v_sesiones_concurrentes, ' sesiones activas.');
+        END IF;
+    END IF;
+    
+    -- Registrar la nueva sesión si es posible
+    IF v_exito = 1 THEN
+        INSERT INTO sesiones_activas (usuario_id, session_id, ip_address, user_agent)
+        VALUES (p_usuario_id, p_session_id, p_ip_address, p_user_agent);
+    END IF;
+    
+    -- Retornar resultados
+    SELECT v_exito as exito, v_mensaje as mensaje;
+END //
+DELIMITER //
+-- Procedimiento para cerrar una sesión específica
+CREATE PROCEDURE sp_cerrar_sesion(
+    IN p_session_id VARCHAR(255)
+)
+BEGIN
+    UPDATE sesiones_activas 
+    SET activo = 0 
+    WHERE session_id = p_session_id AND activo = 1;
+    
+    SELECT ROW_COUNT() as sesiones_cerradas;
+END //
+DELIMITER //
+-- Procedimiento para cerrar todas las sesiones de un usuario
+CREATE PROCEDURE sp_cerrar_todas_sesiones_usuario(
+    IN p_usuario_id INT
+)
+BEGIN
+    UPDATE sesiones_activas 
+    SET activo = 0 
+    WHERE usuario_id = p_usuario_id AND activo = 1;
+    
+    SELECT ROW_COUNT() as sesiones_cerradas;
+END //
+DELIMITER //
+-- Procedimiento para obtener sesiones activas de un usuario
+CREATE PROCEDURE sp_obtener_sesiones_activas(
+    IN p_usuario_id INT
+)
+BEGIN
+    SELECT 
+        id,
+        session_id,
+        ip_address,
+        user_agent,
+        fecha_inicio,
+        fecha_ultima_actividad,
+        TIMESTAMPDIFF(MINUTE, fecha_ultima_actividad, NOW()) as minutos_inactivo
+    FROM sesiones_activas
+    WHERE usuario_id = p_usuario_id AND activo = 1
+    ORDER BY fecha_ultima_actividad DESC;
+END //
+DELIMITER //
+-- Procedimiento para limpiar sesiones inactivas
+CREATE PROCEDURE sp_limpiar_sesiones_inactivas(
+    IN p_minutos_inactividad INT
+)
+BEGIN
+    IF p_minutos_inactividad IS NULL THEN
+        SET p_minutos_inactividad = 30;
+    END IF;
+    
+    UPDATE sesiones_activas 
+    SET activo = 0 
+    WHERE activo = 1 
+    AND TIMESTAMPDIFF(MINUTE, fecha_ultima_actividad, NOW()) > p_minutos_inactividad;
+    
+    SELECT ROW_COUNT() as sesiones_limpiadas;
+END //
+DELIMITER //
+-- Procedimiento para actualizar actividad de sesión
+CREATE PROCEDURE sp_actualizar_actividad_sesion(
+    IN p_session_id VARCHAR(255)
+)
+BEGIN
+    UPDATE sesiones_activas 
+    SET fecha_ultima_actividad = NOW()
+    WHERE session_id = p_session_id AND activo = 1;
+    
+    SELECT ROW_COUNT() > 0 as exito;
+END //
+DELIMITER //
+-- Procedimiento para obtener suscripción de un usuario
+CREATE PROCEDURE sp_obtener_suscripcion_usuario(
+    IN p_usuario_id INT
+)
+BEGIN
+    SELECT 
+        s.id as suscripcion_id,
+        s.nombre as suscripcion_nombre,
+        s.descripcion as suscripcion_descripcion,
+        s.tipo as tipo_suscripcion,
+        s.sesiones_concurrentes,
+        s.usuarios_maximos,
+        s.precio,
+        us.fecha_inicio,
+        us.fecha_fin,
+        us.activo as suscripcion_activa,
+        (SELECT COUNT(*) FROM sesiones_activas WHERE usuario_id = p_usuario_id AND activo = 1) as sesiones_activas_actuales
+    FROM usuarios_suscripcion us
+    JOIN suscripciones s ON us.suscripcion_id = s.id
+    WHERE us.usuario_id = p_usuario_id AND us.activo = 1
+    LIMIT 1;
+END //
+DELIMITER //
+-- Procedimiento para obtener estadísticas de sesiones
+CREATE PROCEDURE sp_obtener_estadisticas_sesiones()
+BEGIN
+    SELECT 
+        (SELECT COUNT(*) FROM sesiones_activas WHERE activo = 1) as total_sesiones_activas,
+        (SELECT COUNT(DISTINCT usuario_id) FROM sesiones_activas WHERE activo = 1) as usuarios_con_sesion,
+        (SELECT AVG(TIMESTAMPDIFF(MINUTE, fecha_inicio, fecha_ultima_actividad)) 
+         FROM sesiones_activas WHERE activo = 1) as promedio_minutos_sesion;
+END //
+DELIMITER //
+-- Procedimiento para obtener suscripciones disponibles
+CREATE PROCEDURE sp_obtener_suscripciones_disponibles()
+BEGIN
+    SELECT 
+        id,
+        nombre,
+        descripcion,
+        tipo,
+        sesiones_concurrentes,
+        usuarios_maximos,
+        duracion_dias,
+        precio,
+        activo
+    FROM suscripciones
+    WHERE activo = 1
+    ORDER BY precio ASC, tipo ASC;
+END //
+DELIMITER //
+-- Procedimiento para asignar suscripción a un usuario
+CREATE PROCEDURE sp_asignar_suscripcion(
+    IN p_usuario_id INT,
+    IN p_suscripcion_id INT,
+    IN p_fecha_fin TIMESTAMP
+)
+BEGIN
+    DECLARE v_exito BOOLEAN DEFAULT 1;
+    DECLARE v_mensaje VARCHAR(255) DEFAULT 'Suscripción asignada correctamente';
+    
+    -- Desactivar suscripción actual si existe
+    UPDATE usuarios_suscripcion 
+    SET activo = 0 
+    WHERE usuario_id = p_usuario_id AND activo = 1;
+    
+    -- Insertar nueva suscripción
+    INSERT INTO usuarios_suscripcion (usuario_id, suscripcion_id, fecha_fin)
+    VALUES (p_usuario_id, p_suscripcion_id, p_fecha_fin);
+    
+    SELECT v_exito as exito, v_mensaje as mensaje;
+END //
+DELIMITER //
+-- Procedimiento para verificar si una sesión está activa
+CREATE PROCEDURE sp_sesion_activa(
+    IN p_session_id VARCHAR(255)
+)
+BEGIN
+    SELECT COUNT(*) > 0 as activa
+    FROM sesiones_activas
+    WHERE session_id = p_session_id AND activo = 1;
+END //
+
+DELIMITER ;
+
+-- =====================================================
+-- TRIGGERS
+-- =====================================================
+
+DELIMITER //
+
+-- Trigger para bitácora de sesión iniciada
+CREATE TRIGGER trg_bitacora_sesion_iniciada
+AFTER INSERT ON sesiones_activas
+FOR EACH ROW
+BEGIN
+    INSERT INTO bitacora (usuario_id, accion, tabla, registro_id, detalles, fecha)
+    VALUES (NEW.usuario_id, 'INSERT', 'sesiones_activas', NEW.id, 
+            CONCAT('Sesión iniciada - IP: ', NEW.ip_address), NOW());
+END //
+
+-- Trigger para bitácora de sesión cerrada
+CREATE TRIGGER trg_bitacora_sesion_cerrada
+AFTER UPDATE ON sesiones_activas
+FOR EACH ROW
+BEGIN
+    IF OLD.activo = 1 AND NEW.activo = 0 THEN
+        INSERT INTO bitacora (usuario_id, accion, tabla, registro_id, detalles, fecha)
+        VALUES (NEW.usuario_id, 'UPDATE', 'sesiones_activas', NEW.id, 
+                'Sesión cerrada', NOW());
+    END IF;
+END //
+
+-- Trigger para bitácora de cambio de suscripción
+CREATE TRIGGER trg_bitacora_suscripcion_cambiada
+AFTER INSERT ON usuarios_suscripcion
+FOR EACH ROW
+BEGIN
+    INSERT INTO bitacora (usuario_id, accion, tabla, registro_id, detalles, fecha)
+    VALUES (NEW.usuario_id, 'INSERT', 'usuarios_suscripcion', NEW.id, 
+            CONCAT('Suscripción asignada - ID: ', NEW.suscripcion_id), NOW());
+END //
+
+DELIMITER ;
+
+-- =====================================================
+-- EVENTOS
+-- =====================================================
+
+-- Evento para limpiar sesiones inactivas cada 5 minutos
+CREATE EVENT IF NOT EXISTS ev_limpiar_sesiones_inactivas
+ON SCHEDULE EVERY 5 MINUTE
+DO
+    CALL sp_limpiar_sesiones_inactivas(30);
+
+-- Evento para desactivar suscripciones expiradas diariamente
+CREATE EVENT IF NOT EXISTS ev_desactivar_suscripciones_expiradas
+ON SCHEDULE EVERY 1 DAY
+STARTS CURRENT_TIMESTAMP
+DO
+    UPDATE usuarios_suscripcion 
+    SET activo = 0 
+    WHERE activo = 1 
+    AND fecha_fin IS NOT NULL 
+    AND fecha_fin < NOW();
+
+-- =====================================================
+-- ÍNDICES PARA OPTIMIZACIÓN
+-- =====================================================
+
+CREATE INDEX idx_sesiones_activas_usuario ON sesiones_activas(usuario_id, activo);
+CREATE INDEX idx_sesiones_activas_session ON sesiones_activas(session_id);
+CREATE INDEX idx_sesiones_activas_fecha ON sesiones_activas(fecha_ultima_actividad);
+CREATE INDEX idx_usuarios_suscripcion_usuario ON usuarios_suscripcion(usuario_id, activo);
+CREATE INDEX idx_usuarios_suscripcion_fecha ON usuarios_suscripcion(fecha_fin);
+
+
+
+CREATE TABLE IF NOT EXISTS transacciones (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    usuario_id INT NOT NULL,
+    suscripcion_id INT NOT NULL,
+    monto DECIMAL(10,2) NOT NULL,
+    metodo_pago VARCHAR(50) NOT NULL,
+    estado ENUM('pendiente', 'completada', 'fallida', 'reembolsada') NOT NULL DEFAULT 'pendiente',
+    fecha_transaccion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    detalles TEXT,
+    FOREIGN KEY (usuario_id) REFERENCES usuarios(id) ON DELETE CASCADE,
+    FOREIGN KEY (suscripcion_id) REFERENCES suscripciones(id) ON DELETE CASCADE
+);
+
+-- Índices para transacciones
+CREATE INDEX idx_transacciones_usuario ON transacciones(usuario_id);
+CREATE INDEX idx_transacciones_fecha ON transacciones(fecha_transaccion);
+CREATE INDEX idx_transacciones_estado ON transacciones(estado);
+
+
+USE gestion_cursos;
+
+-- =====================================================
+-- ACTUALIZAR PROCEDIMIENTO sp_verificar_sesion_disponible
+-- =====================================================
+
+DROP PROCEDURE IF EXISTS sp_verificar_sesion_disponible;
+
+DELIMITER //
+CREATE PROCEDURE sp_verificar_sesion_disponible(
+    IN p_usuario_id INT
+)
+BEGIN
+    DECLARE v_suscripcion_id INT;
+    DECLARE v_sesiones_concurrentes INT;
+    DECLARE v_sesiones_activas INT;
+    DECLARE v_puede_iniciar BOOLEAN DEFAULT 1;
+    DECLARE v_mensaje VARCHAR(255) DEFAULT 'Puede iniciar sesión';
+    
+    -- Obtener la suscripción activa del usuario
+    SELECT us.suscripcion_id, s.sesiones_concurrentes
+    INTO v_suscripcion_id, v_sesiones_concurrentes
+    FROM usuarios_suscripcion us
+    JOIN suscripciones s ON us.suscripcion_id = s.id
+    WHERE us.usuario_id = p_usuario_id AND us.activo = 1
+    LIMIT 1;
+    
+    -- Si no tiene suscripción, asignar básica gratuita
+    IF v_suscripcion_id IS NULL THEN
+        INSERT INTO usuarios_suscripcion (usuario_id, suscripcion_id, fecha_fin)
+        VALUES (p_usuario_id, 1, DATE_ADD(NOW(), INTERVAL 30 DAY));
+        
+        SET v_suscripcion_id = 1;
+        SET v_sesiones_concurrentes = 1;
+    END IF;
+    
+    -- Contar sesiones activas del usuario
+    SELECT COUNT(*)
+    INTO v_sesiones_activas
+    FROM sesiones_activas
+    WHERE usuario_id = p_usuario_id AND activo = 1;
+    
+    -- Siempre puede iniciar sesión (se cerrará la más antigua si es necesario)
+    -- Solo mostrar advertencia si está en el límite
+    IF v_sesiones_activas >= v_sesiones_concurrentes THEN
+        SET v_mensaje = CONCAT('Se cerrará la sesión más antigua para permitir esta nueva sesión. Límite: ', v_sesiones_concurrentes, ' sesiones.');
+    END IF;
+    
+    -- Retornar resultados
+    SELECT v_puede_iniciar as puede_iniciar, v_sesiones_activas as sesiones_activas, 
+           v_sesiones_concurrentes as limite_sesiones, v_mensaje as mensaje;
+END //
+DELIMITER ;
+
+-- =====================================================
+-- ACTUALIZAR PROCEDIMIENTO sp_registrar_sesion
+-- =====================================================
+
+DROP PROCEDURE IF EXISTS sp_registrar_sesion;
+
+DELIMITER //
+CREATE PROCEDURE sp_registrar_sesion(
+    IN p_usuario_id INT,
+    IN p_session_id VARCHAR(255),
+    IN p_ip_address VARCHAR(45),
+    IN p_user_agent TEXT
+)
+BEGIN
+    DECLARE v_suscripcion_id INT;
+    DECLARE v_sesiones_concurrentes INT;
+    DECLARE v_sesiones_activas INT;
+    DECLARE v_exito BOOLEAN DEFAULT 1;
+    DECLARE v_mensaje VARCHAR(255) DEFAULT 'Sesión registrada correctamente';
+    
+    -- Obtener la suscripción activa del usuario
+    SELECT us.suscripcion_id, s.sesiones_concurrentes
+    INTO v_suscripcion_id, v_sesiones_concurrentes
+    FROM usuarios_suscripcion us
+    JOIN suscripciones s ON us.suscripcion_id = s.id
+    WHERE us.usuario_id = p_usuario_id AND us.activo = 1
+    LIMIT 1;
+    
+    -- Si no tiene suscripción, asignar básica gratuita
+    IF v_suscripcion_id IS NULL THEN
+        INSERT INTO usuarios_suscripcion (usuario_id, suscripcion_id, fecha_fin)
+        VALUES (p_usuario_id, 1, DATE_ADD(NOW(), INTERVAL 30 DAY));
+        
+        SET v_suscripcion_id = 1;
+        SET v_sesiones_concurrentes = 1;
+    END IF;
+    
+    -- Contar sesiones activas del usuario
+    SELECT COUNT(*)
+    INTO v_sesiones_activas
+    FROM sesiones_activas
+    WHERE usuario_id = p_usuario_id AND activo = 1;
+    
+    -- Verificar límite de sesiones
+    IF v_sesiones_activas >= v_sesiones_concurrentes THEN
+        -- Cerrar la sesión más antigua para hacer espacio
+        UPDATE sesiones_activas 
+        SET activo = 0 
+        WHERE usuario_id = p_usuario_id AND activo = 1
+        ORDER BY fecha_inicio ASC 
+        LIMIT 1;
+        
+        SET v_mensaje = CONCAT('Se cerró la sesión más antigua para permitir esta nueva sesión. Límite: ', v_sesiones_concurrentes, ' sesiones.');
+    END IF;
+    
+    -- Registrar la nueva sesión
+    INSERT INTO sesiones_activas (usuario_id, session_id, ip_address, user_agent)
+    VALUES (p_usuario_id, p_session_id, p_ip_address, p_user_agent);
+    
+    -- Retornar resultados
+    SELECT v_exito as exito, v_mensaje as mensaje;
+END //
+DELIMITER ;
+
+-- =====================================================
+-- VERIFICAR QUE LOS CAMBIOS SE APLICARON CORRECTAMENTE
+-- =====================================================
+
+SELECT 'Procedimientos actualizados correctamente' as resultado;
+
+-- Mostrar información de las suscripciones disponibles
+SELECT 
+    id,
+    nombre,
+    sesiones_concurrentes,
+    precio
+FROM suscripciones 
+WHERE activo = 1
+ORDER BY precio ASC;
+use gestion_cursos;
+select * from sesiones_activas;
